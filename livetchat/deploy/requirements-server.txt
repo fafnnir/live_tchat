@@ -1,0 +1,6 @@
+# Dépendances du serveur, versions figées (installées/mises à jour par deploy.sh à chaque exécution).
+# Pour monter de version : modifier ici, tester, puis relancer deploy.sh.
+fastapi==0.136.1
+starlette==1.0.0
+uvicorn[standard]==0.46.0
+python-multipart==0.0.27

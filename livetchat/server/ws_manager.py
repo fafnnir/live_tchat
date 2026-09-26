@@ -60,5 +60,14 @@ class ConnectionManager:
     async def broadcast_to_channel(self, channel: str, message: dict):
         await self._send_many([c for c in self.clients if c.channel == channel], message)
 
+    async def broadcast_media(self, channel: str, message: dict, sender_id: str):
+        """Comme broadcast_to_channel, mais chacun apprend seulement si le média est le sien
+        (l'identifiant de l'expéditeur n'est jamais diffusé)."""
+        targets = [c for c in self.clients if c.channel == channel]
+        await asyncio.gather(
+            self._send_many([c for c in targets if c.client_id == sender_id], {**message, "mine": True}),
+            self._send_many([c for c in targets if c.client_id != sender_id], {**message, "mine": False}),
+        )
+
     async def broadcast_all(self, message: dict):
         await self._send_many(list(self.clients), message)

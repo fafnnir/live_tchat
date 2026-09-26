@@ -19,7 +19,7 @@ from livetchat.server.channel_queue import MEDIA, ChannelQueue, MediaItem
 from livetchat.server.routes_manifest import router as manifest_router
 from livetchat.server.security import (
     LoginGuard, RateLimiter, check_media_signature, check_session_token,
-    clean_text, clean_username, make_session_token, verify_password,
+    clean_text, clean_username, make_session_token, secret_problem, verify_password,
 )
 from livetchat.server.validators import detect
 from livetchat.server.ws_manager import Client, ConnectionManager
@@ -38,8 +38,28 @@ login_guard = LoginGuard(settings.LOGIN_MAX_FAILS, settings.LOGIN_LOCK_S)
 upload_limiter = RateLimiter(settings.UPLOADS_PER_MINUTE, 60)
 
 
+PRESENCE_DEBOUNCE_S = 0.5
+_presence_pending = False
+_presence_tasks: set[asyncio.Task] = set()
+
+
 async def broadcast_presence():
-    await manager.broadcast_all(presence_snapshot())
+    """Regroupe les changements (arrivées, départs, pseudos, files) : au plus une diffusion
+    de la présence à tout le monde toutes les 0,5 s, quel que soit le nombre d'événements."""
+    global _presence_pending
+    if _presence_pending:
+        return
+    _presence_pending = True
+
+    async def later():
+        global _presence_pending
+        await asyncio.sleep(PRESENCE_DEBOUNCE_S)
+        _presence_pending = False          # un changement pendant l'envoi relancera une diffusion
+        await manager.broadcast_all(presence_snapshot())
+
+    task = asyncio.create_task(later())
+    _presence_tasks.add(task)              # garde une référence jusqu'à la fin
+    task.add_done_callback(_presence_tasks.discard)
 
 
 def presence_snapshot() -> dict:
@@ -68,6 +88,9 @@ async def lifespan(_app: FastAPI):
             pass
     for ch in settings.ALLOWED_CHANNELS:
         channel_queues[ch] = ChannelQueue(ch, manager, broadcast_presence)
+    problem = secret_problem()
+    if problem:
+        raise RuntimeError(f"[SECURITY] {problem} — voir livetchat/deploy/env.example")
     if not settings.PASSWORD_HASH:
         print("[SECURITY] LTCHAT_PASSWORD_HASH absent : personne ne pourra se connecter")
     print(f"[START] LiveTchat serveur v{VERSION}")
@@ -144,6 +167,8 @@ async def upload_media(
     queue = channel_queues[channel]
     if queue.is_full():
         raise HTTPException(status_code=429, detail="QUEUE_FULL")
+    if queue.count_from(ip) >= settings.MAX_QUEUED_PER_IP:
+        raise HTTPException(status_code=429, detail="QUEUE_USER_FULL")
 
     ext = os.path.splitext(file.filename or "")[1].lower()
     head = await file.read(4096)
@@ -185,7 +210,7 @@ async def upload_media(
     item = MediaItem(
         media_id=media_id, kind=kind, path=path, content_type=content_type,
         display_time=display_time, display_text=clean_text(display_text, settings.MAX_TEXT_LEN),
-        username=uname, sender_id=client_id, channel=channel,
+        username=uname, sender_id=client_id, sender_ip=ip, channel=channel,
     )
     position = queue.push(item)
     print(f"[UPLOAD] {ip} '{uname}' #{channel} {kind} {size // 1024}KB {display_time:.0f}s pos={position}")
@@ -261,8 +286,10 @@ async def websocket_endpoint(ws: WebSocket):
                 await manager.send(client, {"type": "joined", "channel": client.channel})
                 await broadcast_presence()
             elif mtype == "rename":
-                client.username = clean_username(msg.get("username"))
-                await broadcast_presence()
+                new_name = clean_username(msg.get("username"))
+                if new_name != client.username:
+                    client.username = new_name
+                    await broadcast_presence()
             elif mtype == "skip":
                 queue = channel_queues[client.channel]
                 if queue.skip(str(msg.get("media_id", "")), client.client_id):

@@ -8,6 +8,7 @@ import sys
 import tempfile
 
 import requests
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QMessageBox
 
 from livetchat.client.api import ApiError, fetch_manifest
@@ -28,6 +29,7 @@ def is_newer(latest: str, current: str) -> bool:
 def _msg(parent, title: str, text: str, icon=QMessageBox.Icon.Information):
     box = QMessageBox(parent)
     box.setWindowTitle(title)
+    box.setTextFormat(Qt.TextFormat.PlainText)
     box.setText(text)
     box.setIcon(icon)
     box.exec()
@@ -59,10 +61,55 @@ def check_update(current_version: str, parent=None, manifest: dict | None = None
 
     box = QMessageBox(parent)
     box.setWindowTitle("Mise à jour disponible")
+    box.setTextFormat(Qt.TextFormat.PlainText)
     box.setText(f"Version actuelle : {current_version}\nNouvelle version : {latest}\n\nInstaller maintenant ?")
     box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
     if box.exec() == QMessageBox.StandardButton.Yes:
         _perform_update(url, sha, parent)
+
+
+# Remplacement de l'exe (arguments : exe actuel, nouvel exe).
+# - L'exe actuel est RENOMMÉ en .old (Windows l'autorise même s'il tourne encore), jamais supprimé
+#   avant que le nouveau soit en place : si le déplacement échoue, l'ancien est remis.
+# - Pas de delayed expansion (cassait les chemins contenant "!"), et "ping" pour attendre :
+#   "timeout" échoue sans console (le script tourne en CREATE_NO_WINDOW).
+_UPDATE_BAT = r"""@echo off
+set "TARGET=%~1"
+set "NEW=%~2"
+set "OLD=%~1.old"
+del /f /q "%OLD%" >nul 2>&1
+set /a N=0
+:rename
+move /y "%TARGET%" "%OLD%" >nul 2>&1
+if not errorlevel 1 goto place
+set /a N+=1
+if %N% GEQ 60 goto relaunch
+ping -n 2 127.0.0.1 >nul
+goto rename
+:place
+move /y "%NEW%" "%TARGET%" >nul 2>&1
+if not errorlevel 1 goto relaunch
+move /y "%OLD%" "%TARGET%" >nul 2>&1
+:relaunch
+start "" "%TARGET%"
+set /a N=0
+:cleanup
+if not exist "%OLD%" goto end
+del /f /q "%OLD%" >nul 2>&1
+set /a N+=1
+if %N% GEQ 60 goto end
+ping -n 2 127.0.0.1 >nul
+goto cleanup
+:end
+del "%~f0"
+"""
+
+
+def _bat_command(bat: str, *args: str) -> str:
+    """Ligne de commande pour lancer le .bat. "cmd /s /c" ne retire que les guillemets extérieurs :
+    les chemins avec espaces, "&" ou "!" restent intacts (avec "cmd /c" + plusieurs chemins entre
+    guillemets, la commande était coupée et la mise à jour ne se relançait pas)."""
+    return 'cmd /s /c ""' + bat + '" ' + " ".join(f'"{a}"' for a in args) + '"'
 
 
 def _perform_update(url: str, sha256_hex: str, parent=None):
@@ -86,15 +133,7 @@ def _perform_update(url: str, sha256_hex: str, parent=None):
         _msg(parent, "MAJ", f"Téléchargement impossible : {e}", QMessageBox.Icon.Critical)
         return
 
-    batch = (
-        '@echo off\nsetlocal enabledelayedexpansion\n'
-        'set TARGET="%~1"\nset NEW="%~2"\nset RETRIES=60\n'
-        ':waitclose\n>nul 2>&1 (copy /b NUL %TARGET%)\n'
-        'if errorlevel 1 (\n  timeout /t 1 >nul\n  set /a RETRIES-=1\n'
-        '  if !RETRIES! GTR 0 goto waitclose\n  exit /b 1\n)\n'
-        'del /f /q %TARGET% >nul 2>&1\nmove /y %NEW% %TARGET%\n'
-        'start "" %TARGET%\ndel "%~f0"\n'
-    )
+    batch = _UPDATE_BAT
     # Le nouvel exe ne doit pas hériter des variables internes de PyInstaller de celui-ci :
     # sinon il cherche python3xx.dll dans notre dossier _MEI temporaire, effacé à la fermeture
     # ("Failed to load Python DLL").
@@ -103,7 +142,7 @@ def _perform_update(url: str, sha256_hex: str, parent=None):
     try:
         with open(bat_path, "w", encoding="utf-8") as f:
             f.write(batch)
-        subprocess.Popen(["cmd", "/c", bat_path, sys.executable, new_path], close_fds=True,
+        subprocess.Popen(_bat_command(bat_path, sys.executable, new_path), close_fds=True,
                          env=env, creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception as e:
         _msg(parent, "MAJ", f"Lancement de la mise à jour impossible : {e}", QMessageBox.Icon.Critical)

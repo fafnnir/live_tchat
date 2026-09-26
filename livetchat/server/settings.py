@@ -37,6 +37,7 @@ MAX_BYTES = {
 MAX_DISPLAY_S = {"image": 60.0, "video": 300.0, "audio": 300.0}
 MIN_DISPLAY_S = 1.0
 MAX_QUEUE_PER_CHANNEL = 10
+MAX_QUEUED_PER_IP = 3          # une seule personne ne peut pas bloquer un salon
 MAX_TEXT_LEN = 200
 MAX_USERNAME_LEN = 24
 MAX_WS_CLIENTS = 100

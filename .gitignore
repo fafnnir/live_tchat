@@ -20,3 +20,6 @@ livetchat/client/server_cert.pem
 tmp/
 .tchat_config.json
 dist_*/
+
+# Notes locales
+correction.txt

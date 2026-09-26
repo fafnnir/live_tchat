@@ -27,7 +27,10 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
-ProtectHome=read-only
+# /home est remplacé par un dossier vide : seul le code de l'appli y est remonté, en lecture seule
+# (le processus ne voit ni ~/.ssh ni l'historique ; NoNewPrivileges interdit sudo)
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/ubuntu/livetchat
 ReadWritePaths=/var/lib/livetchat
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -35,6 +38,12 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 LockPersonality=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

@@ -27,10 +27,9 @@ done
 if [ -n "${MISSING:-}" ]; then
     apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $MISSING >/dev/null
 fi
-if [ ! -x "$APP/venv/bin/uvicorn" ]; then
-    sudo -u ubuntu python3 -m venv "$APP/venv"
-    sudo -u ubuntu "$APP/venv/bin/pip" install -q fastapi "uvicorn[standard]" python-multipart
-fi
+[ -x "$APP/venv/bin/python" ] || sudo -u ubuntu python3 -m venv "$APP/venv"
+# À chaque exécution : aligne les paquets sur les versions figées (mises à jour de sécurité comprises)
+sudo -u ubuntu "$APP/venv/bin/pip" install -q --disable-pip-version-check -r "$HERE/requirements-server.txt"
 
 echo "== 1. Swap 1 Go (filet de sécurité, la VM n'a que 1 Go de RAM)"
 if ! swapon --show | grep -q /swapfile; then

@@ -62,7 +62,10 @@ class MediaWindow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Texte venant des autres membres : toujours en texte brut (sinon QLabel interprète le HTML,
+        # ex. <img src="file://..."> qui ferait fuiter le hash Windows via SMB)
         header = QLabel(f"👤  {username}")
+        header.setTextFormat(Qt.TextFormat.PlainText)
         header.setStyleSheet(_HEADER_CSS)
         layout.addWidget(header)
 
@@ -75,6 +78,7 @@ class MediaWindow(QWidget):
 
         if caption:
             cap = QLabel(caption)
+            cap.setTextFormat(Qt.TextFormat.PlainText)
             cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cap.setWordWrap(True)
             cap.setStyleSheet(_CAPTION_CSS)

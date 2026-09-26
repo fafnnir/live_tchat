@@ -11,8 +11,6 @@ from livetchat.server import settings
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 14, 8, 1   # ~16 Mo de RAM par vérification
 
-if not settings.SECRET_KEY:
-    print("[SECURITY] LTCHAT_SECRET absent : clé aléatoire (les jetons sautent au redémarrage)")
 _SECRET = (settings.SECRET_KEY or secrets.token_hex(32)).encode()
 # Changer le mot de passe invalide tous les jetons existants
 _SESSION_KEY = hashlib.sha256(_SECRET + b"|session|" + settings.PASSWORD_HASH.encode()).digest()
@@ -60,8 +58,8 @@ def make_session_token() -> str:
     return f"{_b64e(payload.encode())}.{_sign(_SESSION_KEY, payload)}"
 
 
-def check_session_token(token: str | None) -> bool:
-    if not token or len(token) > 200 or "." not in token:
+def check_session_token(token) -> bool:
+    if not isinstance(token, str) or not token or len(token) > 200 or "." not in token:
         return False
     try:
         p64, sig = token.split(".", 1)
@@ -79,7 +77,19 @@ def media_signature(media_id: str, exp: int) -> str:
 
 
 def check_media_signature(media_id: str, exp: int, sig: str) -> bool:
-    return exp > time.time() and hmac.compare_digest(sig, media_signature(media_id, exp))
+    if exp <= time.time() or not sig.isascii():   # compare_digest refuse les str non-ASCII
+        return False
+    return hmac.compare_digest(sig, media_signature(media_id, exp))
+
+
+def secret_problem() -> str | None:
+    """Raison de refuser de démarrer si la clé secrète est absente ou reste celle d'exemple."""
+    s = settings.SECRET_KEY
+    if not s:
+        return "LTCHAT_SECRET absent"
+    if "REMPLACER" in s or len(s) < 32:
+        return "LTCHAT_SECRET trop court ou encore la valeur d'exemple (32 caractères minimum)"
+    return None
 
 
 # ------------------------------------------------------------

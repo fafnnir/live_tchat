@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 )
 
 from livetchat.client import api
-from livetchat.client.config import CLIENT_ID, load_config, save_config
+from livetchat.client.config import load_config, save_config
 from livetchat.client.media_overlay import MediaWindow, find_screen, identify_screens, screen_label
 from livetchat.client.media_prep import FILE_FILTER, PrepError, kind_of, prepare, probe_duration
 from livetchat.client.updater import check_update
@@ -118,6 +118,7 @@ class LoginDialog(QDialog):
         self._pw.returnPressed.connect(self._submit)
         lay.addWidget(self._pw)
         self._err = QLabel(message)
+        self._err.setTextFormat(Qt.TextFormat.PlainText)
         self._err.setObjectName("error")
         self._err.setWordWrap(True)
         lay.addWidget(self._err)
@@ -215,6 +216,7 @@ class MainWindow(QMainWindow):
         right.setSpacing(12)
 
         self._title = QLabel()
+        self._title.setTextFormat(Qt.TextFormat.PlainText)
         self._title.setStyleSheet("color: white; font-size: 20px; font-weight: bold;")
         right.addWidget(self._title)
 
@@ -278,6 +280,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._section_label("En cours"))
         row = QHBoxLayout()
         self._now_label = QLabel("Rien pour le moment.")
+        self._now_label.setTextFormat(Qt.TextFormat.PlainText)   # contient le pseudo d'un autre membre
         self._now_label.setWordWrap(True)
         row.addWidget(self._now_label, 1)
         self._btn_stop = QPushButton("⏹  Stop (chez moi)")
@@ -594,7 +597,7 @@ class MainWindow(QMainWindow):
         self._refresh_now_playing()
 
     def _skip_all(self):
-        if self._current and self._current.get("sender_id") == CLIENT_ID:
+        if self._current and self._current.get("mine"):
             self._ws.skip(self._current["media_id"])
 
     def _refresh_now_playing(self):
@@ -605,7 +608,7 @@ class MainWindow(QMainWindow):
             self._btn_skip.setVisible(False)
             return
         icon = {"image": "🖼", "video": "🎬", "audio": "🎵"}.get(cur.get("kind"), "📦")
-        mine = cur.get("sender_id") == CLIENT_ID
+        mine = bool(cur.get("mine"))
         stopped = cur["media_id"] in self._stopped_locally
         who = "toi" if mine else cur.get("username", "?")
         self._now_label.setText(f"{icon}  {cur.get('kind')} de {who}" + ("  (arrêté chez moi)" if stopped else ""))

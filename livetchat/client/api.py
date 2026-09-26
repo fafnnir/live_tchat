@@ -10,6 +10,7 @@ ERRORS = {
     "AUTH_REQUIRED": "Session expirée, reconnecte-toi.",
     "UNSUPPORTED_FORMAT": "Format non supporté (ou fichier corrompu).",
     "QUEUE_FULL": "La file de ce salon est pleine, réessaie plus tard.",
+    "QUEUE_USER_FULL": "Tu as déjà 3 médias en attente dans ce salon, attends qu'ils passent.",
     "TOO_MANY_UPLOADS": "Trop d'envois, attends une minute.",
     "UNKNOWN_CHANNEL": "Salon inconnu.",
     "EXPIRED": "Le média n'est plus disponible.",

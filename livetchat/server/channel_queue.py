@@ -22,6 +22,7 @@ class MediaItem:
     display_text: str
     username: str
     sender_id: str
+    sender_ip: str
     channel: str
     link_exp: int = 0
     skip_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -69,6 +70,10 @@ class ChannelQueue:
             return True
         return False
 
+    def count_from(self, ip: str) -> int:
+        items = list(self.queue) + ([self.current] if self.current else [])
+        return sum(1 for it in items if it.sender_ip == ip)
+
     def queue_size(self) -> int:
         return len(self.queue)
 
@@ -81,7 +86,7 @@ class ChannelQueue:
             try:
                 item.link_exp = int(time.time() + item.display_time + settings.MEDIA_LINK_GRACE_S)
                 sig = media_signature(item.media_id, item.link_exp)
-                await self.manager.broadcast_to_channel(self.channel, {
+                await self.manager.broadcast_media(self.channel, {
                     "type": "display_start",
                     "media_id": item.media_id,
                     "kind": item.kind,
@@ -90,10 +95,9 @@ class ChannelQueue:
                     "display_time": item.display_time,
                     "display_text": item.display_text,
                     "username": item.username,
-                    "sender_id": item.sender_id,
                     "channel": self.channel,
                     "queue_remaining": len(self.queue),
-                })
+                }, item.sender_id)
                 await self.on_change()
                 try:
                     await asyncio.wait_for(item.skip_event.wait(), item.display_time)

@@ -1,9 +1,4 @@
-# Serveur (Ubuntu, venv)
-fastapi
-uvicorn[standard]
-python-multipart
-
-# Client (Windows, build de l'exe)
+# Client Windows (build de l'exe). Le serveur : livetchat/deploy/requirements-server.txt
 PyQt6>=6.5          # lecteur multimédia intégré (FFmpeg), plus besoin de VLC
 requests
 websocket-client
