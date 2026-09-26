@@ -8,7 +8,7 @@ from PyQt6.QtCore import (
     QBuffer, QByteArray, QIODevice, QPropertyAnimation, QEasingCurve, QSize, Qt, QTimer, QUrl,
     pyqtSignal,
 )
-from PyQt6.QtGui import QImageReader, QMovie, QPixmap
+from PyQt6.QtGui import QGuiApplication, QImageReader, QMovie, QPixmap, QScreen
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
@@ -35,8 +35,11 @@ class MediaWindow(QWidget):
     closed = pyqtSignal(str)   # media_id
 
     def __init__(self, *, media_id: str, kind: str, data: bytes, content_type: str,
-                 caption: str, username: str, duration_s: float, on_top: bool):
+                 caption: str, username: str, duration_s: float, on_top: bool,
+                 screen: QScreen | None = None):
         super().__init__(None)
+        target = screen or QApplication.primaryScreen()
+        self.setScreen(target)
         self.media_id = media_id
         self._player: QMediaPlayer | None = None
         self._closing = False
@@ -54,7 +57,7 @@ class MediaWindow(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Clic = arrêter chez moi")
 
-        screen = QApplication.primaryScreen().availableGeometry()
+        screen = target.availableGeometry()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -161,3 +164,37 @@ class MediaWindow(QWidget):
             self._player.setSourceDevice(None)
         self.closed.emit(self.media_id)
         super().closeEvent(event)
+
+
+# ─────────────────────────────────────────────
+# Écrans
+# ─────────────────────────────────────────────
+def screen_label(index: int, screen: QScreen) -> str:
+    size = screen.size()
+    primary = "  (principal)" if screen == QGuiApplication.primaryScreen() else ""
+    return f"Écran {index + 1} — {size.width()}×{size.height()}{primary}"
+
+
+def find_screen(name: str) -> QScreen | None:
+    """Écran enregistré par son nom ; None s'il n'est plus branché (= écran principal)."""
+    return next((s for s in QGuiApplication.screens() if s.name() == name), None) if name else None
+
+
+def identify_screens(duration_ms: int = 2500) -> list[QWidget]:
+    """Affiche un gros numéro au centre de chaque écran pendant quelques secondes."""
+    windows = []
+    for i, screen in enumerate(QGuiApplication.screens()):
+        w = QLabel(str(i + 1))
+        w.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        w.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        w.setStyleSheet("background: #5865f2; color: white; font-size: 120px; font-weight: bold; border-radius: 20px;")
+        w.setFixedSize(220, 220)
+        w.setScreen(screen)
+        geo = screen.geometry()
+        w.move(geo.x() + (geo.width() - 220) // 2, geo.y() + (geo.height() - 220) // 2)
+        w.show()
+        QTimer.singleShot(duration_ms, w.close)
+        windows.append(w)
+    return windows

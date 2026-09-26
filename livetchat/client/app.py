@@ -4,15 +4,15 @@ import sys
 import traceback
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QPalette
+from PyQt6.QtGui import QBrush, QColor, QFont, QGuiApplication, QPalette
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QStatusBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from livetchat.client import api
 from livetchat.client.config import CLIENT_ID, load_config, save_config
-from livetchat.client.media_overlay import MediaWindow
+from livetchat.client.media_overlay import MediaWindow, find_screen, identify_screens, screen_label
 from livetchat.client.media_prep import FILE_FILTER, PrepError, kind_of, prepare, probe_duration
 from livetchat.client.updater import check_update
 from livetchat.client.ws_client import WsWorker
@@ -32,6 +32,16 @@ QLineEdit {
     border-radius: 6px; padding: 8px 12px; font-size: 13px; selection-background-color: #5865f2;
 }
 QLineEdit:focus { border: 1px solid #5865f2; }
+QComboBox {
+    background-color: #1e1f22; color: #dbdee1; border: 1px solid #1e1f22;
+    border-radius: 6px; padding: 6px 10px; font-size: 13px;
+}
+QComboBox:focus { border: 1px solid #5865f2; }
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox QAbstractItemView {
+    background-color: #1e1f22; color: #dbdee1; border: 1px solid #404249;
+    selection-background-color: #404249; outline: 0;
+}
 QPushButton#btn_primary {
     background-color: #5865f2; color: white; border: none; border-radius: 6px;
     padding: 10px 20px; font-size: 14px; font-weight: bold;
@@ -283,7 +293,25 @@ class MainWindow(QMainWindow):
 
         right.addStretch()
 
-        # Bas : case "par-dessus tout" + mise à jour
+        # Bas : écran d'affichage, case "par-dessus tout", mise à jour
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Écran :"))
+        self._screen_combo = QComboBox()
+        self._screen_combo.setMinimumWidth(220)
+        self._screen_combo.currentIndexChanged.connect(self._on_screen_changed)
+        row.addWidget(self._screen_combo, 1)
+        btn_identify = QPushButton("🔍  Identifier")
+        btn_identify.setObjectName("btn_secondary")
+        btn_identify.setToolTip("Affiche le numéro de chaque écran")
+        btn_identify.clicked.connect(self._identify_screens)
+        row.addWidget(btn_identify)
+        right.addLayout(row)
+        self._saved_screen = cfg["screen"]
+        self._refresh_screens()
+        app = QGuiApplication.instance()
+        app.screenAdded.connect(lambda _s: self._refresh_screens())
+        app.screenRemoved.connect(lambda _s: self._refresh_screens())
+
         row = QHBoxLayout()
         self._on_top = QCheckBox("Afficher les médias par-dessus tout")
         self._on_top.setChecked(cfg["on_top"])
@@ -420,6 +448,28 @@ class MainWindow(QMainWindow):
         self._title.setText(f"#  {self._channel}")
         self._btn_send.setText(f"  Envoyer dans #{self._channel}")
 
+    # ── Écran d'affichage ──────────────────────────────────────
+    def _refresh_screens(self):
+        self._screen_combo.blockSignals(True)
+        self._screen_combo.clear()
+        selected = 0
+        for i, screen in enumerate(QGuiApplication.screens()):
+            self._screen_combo.addItem(screen_label(i, screen), screen.name())
+            if screen.name() == self._saved_screen or (not self._saved_screen and screen == QGuiApplication.primaryScreen()):
+                selected = i
+        # Écran enregistré débranché : on affiche sur le principal, sans oublier le choix
+        if self._saved_screen and not find_screen(self._saved_screen):
+            selected = QGuiApplication.screens().index(QGuiApplication.primaryScreen())
+        self._screen_combo.setCurrentIndex(selected)
+        self._screen_combo.blockSignals(False)
+
+    def _on_screen_changed(self, _index: int):
+        self._saved_screen = self._screen_combo.currentData() or ""
+        save_config(screen=self._saved_screen)
+
+    def _identify_screens(self):
+        self._identify_windows = identify_screens()
+
     # ── Identité ───────────────────────────────────────────────
     def _username(self) -> str:
         return self._username_input.text().strip()[:24] or "guest"
@@ -512,6 +562,7 @@ class MainWindow(QMainWindow):
             media_id=msg["media_id"], kind=msg["kind"], data=data, content_type=msg.get("content_type", ""),
             caption=msg.get("display_text", ""), username=msg.get("username", "guest"),
             duration_s=float(msg.get("display_time", 5)), on_top=self._on_top.isChecked(),
+            screen=find_screen(self._screen_combo.currentData() or ""),
         )
         win.closed.connect(self._on_media_closed)
         self._media_win = win

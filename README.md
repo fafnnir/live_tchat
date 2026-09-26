@@ -8,6 +8,7 @@ salon — par-dessus le jeu en cours si on veut.
 - File d'attente par salon : les médias passent un par un
 - **Stop** pour arrêter chez soi, **Passer pour tous** pour l'expéditeur
 - Case *Afficher les médias par-dessus tout* (sinon fenêtre normale), sans voler le focus du jeu
+- Choix de l'**écran** d'affichage (bouton *Identifier* pour savoir lequel est lequel)
 - Lecture **en mémoire uniquement** : rien n'est enregistré sur le PC des participants, pas besoin de VLC
 - Images : jpg, png, gif, webp (animés compris), bmp, tiff, ico, avif, heic (iPhone)… converties et
   réduites sur le PC de l'expéditeur avant l'envoi
