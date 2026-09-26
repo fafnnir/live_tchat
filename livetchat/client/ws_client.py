@@ -1,136 +1,111 @@
-import json, threading, time
+# livetchat/client/ws_client.py
+# Connexion WebSocket dans un thread dédié, avec reconnexion automatique.
+import json
+import ssl
+import threading
+
 import websocket
-from dataclasses import dataclass
-import base64
+from PyQt6.QtCore import QObject, pyqtSignal
 
-@dataclass
+from livetchat.client.config import CLIENT_ID, TLS_VERIFY, ws_url
+from livetchat.shared.version import VERSION
 
-class PendingEvent:
-    kind: str
-    event_id: str
-    username: str
-    display_time: float
-    display_text: str
-    content_type: str
-    content_length: int
-    start_after_ms: int
-    server_ts_ms: int
-    received_bytes: bytearray
 
-class LiveClient:
-    def __init__(self, ws_url: str, on_image, on_video, on_audio, on_status):
-        self.ws_url = ws_url; self.ws = None; self.thread = None; self.alive = False
-        self.pending = None
-        self.on_image = on_image; self.on_video = on_video; self.on_audio = on_audio; self.on_status = on_status
-        self._send_lock = threading.Lock(); self._pinger = None
+class WsWorker(QObject):
+    status_changed = pyqtSignal(str)
+    presence = pyqtSignal(list)
+    display_start = pyqtSignal(dict)
+    display_end = pyqtSignal(dict)
+    joined = pyqtSignal(str)
+    auth_error = pyqtSignal()
 
-    def connect(self):
-        if self.thread and self.thread.is_alive(): return
-        self.alive = True; self.thread = threading.Thread(target=self._run, daemon=True); self.thread.start()
-        self._pinger = threading.Thread(target=self._ping_loop, daemon=True); self._pinger.start()
+    def __init__(self, token: str, username: str, channel: str):
+        super().__init__()
+        self.token, self.username, self.channel = token, username, channel
+        self._ws: websocket.WebSocketApp | None = None
+        self._alive = True
+        self._paused = threading.Event()     # posé quand le jeton est refusé
+        self._wake = threading.Event()
 
-    def _ping_loop(self):
-        while self.alive:
+    # ── Boucle du thread ─────────────────────────────────────
+    def run(self):
+        while self._alive:
+            if self._paused.is_set():
+                self._wake.wait(1)
+                self._wake.clear()
+                continue
             try:
-                if self.ws: self.ws.ping()
-            except Exception: pass
-            time.sleep(20)
+                self._ws = websocket.WebSocketApp(
+                    ws_url(),
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=lambda _ws, e: print(f"[WS] erreur : {e}"),
+                    on_close=lambda *_: None,
+                )
+                sslopt = {"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": TLS_VERIFY} if isinstance(TLS_VERIFY, str) else None
+                self._ws.run_forever(ping_interval=25, ping_timeout=10, sslopt=sslopt)
+            except Exception as e:
+                print(f"[WS] {e}")
+            if self._alive and not self._paused.is_set():
+                self.status_changed.emit("🔌  Déconnecté — reconnexion…")
+                self._wake.wait(3)
+                self._wake.clear()
 
-    def _run(self):
-        while self.alive:
+    def _on_open(self, ws):
+        ws.send(json.dumps({
+            "type": "hello", "token": self.token, "username": self.username,
+            "channel": self.channel, "client_id": CLIENT_ID, "version": VERSION,
+        }))
+
+    def _on_message(self, _ws, raw):
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return
+        mtype = msg.get("type")
+        if mtype == "presence":
+            self.presence.emit(msg.get("channels", []))
+        elif mtype == "display_start":
+            self.display_start.emit(msg)
+        elif mtype == "display_end":
+            self.display_end.emit(msg)
+        elif mtype in ("welcome", "joined"):
+            self.channel = msg.get("channel", self.channel)
+            self.joined.emit(self.channel)
+            self.status_changed.emit(f"✅  Connecté → #{self.channel}")
+        elif mtype == "auth_error":
+            self._paused.set()
+            self.auth_error.emit()
+
+    # ── Appelé depuis l'UI ───────────────────────────────────
+    def _send(self, payload: dict):
+        try:
+            if self._ws and self._ws.sock and self._ws.sock.connected:
+                self._ws.send(json.dumps(payload))
+        except Exception as e:
+            print(f"[WS] envoi impossible : {e}")
+
+    def join(self, channel: str):
+        self.channel = channel
+        self._send({"type": "join", "channel": channel})
+
+    def rename(self, username: str):
+        self.username = username
+        self._send({"type": "rename", "username": username})
+
+    def skip(self, media_id: str):
+        self._send({"type": "skip", "media_id": media_id})
+
+    def resume(self, token: str):
+        self.token = token
+        self._paused.clear()
+        self._wake.set()
+
+    def stop(self):
+        self._alive = False
+        self._wake.set()
+        if self._ws:
             try:
-                self.ws = websocket.WebSocket(); self.ws.connect(self.ws_url, timeout=5)
-                self.on_status("Connecté au serveur.")
-                while self.alive:
-                    msg = self.ws.recv()
-                    if isinstance(msg, bytes):
-                        if self.pending is not None:
-                            self.pending.received_bytes.extend(msg)
-                            if len(self.pending.received_bytes) >= self.pending.content_length:
-                                self._finalize_pending()
-                    else:
-                        try:
-                            obj = json.loads(msg)
-                        except Exception:
-                            continue
-                        mtype = obj.get("type")
-                        if mtype in ("image_start", "video_start", "audio_start"):
-                            kind = "image" if mtype == "image_start" else "video" if mtype == "video_start" else "audio"
-                            self.pending = PendingEvent(
-                                kind=kind,
-                                event_id=obj.get("event_id", ""),
-                                username=obj.get("username", ""),
-                                display_time=float(obj.get("display_time", 3)),
-                                display_text=obj.get("display_text", ""),
-                                content_type=obj.get("content_type", "image/jpeg"),
-                                content_length=int(obj.get("content_length", 0)),
-                                start_after_ms=int(obj.get("start_after_ms", 1000)),
-                                server_ts_ms=int(obj.get("server_ts_ms", 0)),
-                                received_bytes=bytearray(),
-                            )
-                            self.pending._encoding = obj.get("encoding", "bin")
-                            self.pending._meta_received_local_ms = int(time.time() * 1000)
-                        elif mtype in ("image_chunk_b64", "video_chunk_b64", "audio_chunk_b64"):
-                            if self.pending is not None:
-                                b64 = obj.get("b64", "")
-                                if b64:
-                                    try:
-                                        self.pending.received_bytes.extend(base64.b64decode(b64))
-                                    except Exception:
-                                        pass
-                                # finalisation si on a tout reçu
-                                if len(self.pending.received_bytes) >= self.pending.content_length:
-                                    self._finalize_pending()
-                        elif mtype in ("image_end", "video_end", "audio_end"):
-                            if self.pending is not None:
-                                self._finalize_pending()
-                        elif mtype in ("image_ack", "video_ack", "audio_ack"):
-                            b = obj.get("bytes", 0); ct = obj.get("content_type", "?")
-                            self.on_status(f"✅ Envoyé ({ct}, {b} octets).")
-                        elif mtype == "error":
-                            self.on_status(f"❌ Erreur: {obj.get('error','?')}")
-                        else:
-                            pass
+                self._ws.close()
             except Exception:
-                self.on_status("Déconnecté. Reconnexion…"); time.sleep(2.0)
-            finally:
-                try:
-                    if self.ws: self.ws.close()
-                except Exception: pass
-                self.ws = None
-                
-    def _finalize_pending(self):
-        if not self.pending: return
-        p = self.pending; self.pending = None
-        now_ms = int(time.time() * 1000)
-        target_ms = getattr(p, "_target_ms", None)
-        if target_ms is None: target_ms = p._meta_received_local_ms + p.start_after_ms
-        delay = max(0.0, (target_ms - now_ms) / 1000.0)
-        data = bytes(p.received_bytes)
-        import threading
-        if p.kind == "image":
-            threading.Thread(target=self.on_image, args=(p, data, delay), daemon=True).start()
-        elif p.kind == "video":
-            threading.Thread(target=self.on_video, args=(p, data, delay), daemon=True).start()
-        else:
-            threading.Thread(target=self.on_audio, args=(p, data, delay), daemon=True).start()
-
-    def send_image(self, username, display_time, display_text, img_bytes, content_type):
-        if not self.ws: raise RuntimeError("WebSocket non connecté.")
-        meta = {"type":"image_meta","username":username,"display_time":float(display_time),"display_text":display_text,"content_type":content_type}
-        with self._send_lock:
-            self.on_status("Envoi image…"); self.ws.send(json.dumps(meta)); self.ws.send(img_bytes)
-
-    def send_video(self, username, display_time, display_text, video_bytes, content_type):
-        if not self.ws: raise RuntimeError("WebSocket non connecté.")
-        meta = {"type":"video_meta","username":username,"display_time":float(display_time),"display_text":display_text,"content_type":content_type}
-        with self._send_lock:
-            self.on_status("Envoi vidéo…"); self.ws.send(json.dumps(meta)); self.ws.send(video_bytes)
-
-    def send_audio(self, username, display_time, display_text, audio_bytes, content_type):
-        if not self.ws: raise RuntimeError("WebSocket non connecté.")
-        meta = {"type":"audio_meta","username":username,"display_time":float(display_time),"display_text":display_text,"content_type":content_type}
-        with self._send_lock:
-            self.on_status("Envoi audio…"); self.ws.send(json.dumps(meta)); self.ws.send(audio_bytes)
-
-    def close(self): self.alive = False
+                pass

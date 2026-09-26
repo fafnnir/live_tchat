@@ -1,179 +1,280 @@
 # livetchat/server/main.py
-import os
-import hashlib
+import asyncio
 import json
+import math
+import os
+import re
+import secrets
+from contextlib import asynccontextmanager
+
 from fastapi import (
-    FastAPI, WebSocket, WebSocketDisconnect,
-    UploadFile, File, Form, Request
+    Depends, FastAPI, File, Form, HTTPException, Request, UploadFile,
+    WebSocket, WebSocketDisconnect,
 )
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel
 
-from livetchat.server.ws_manager import ConnectionManager
 from livetchat.server import settings
-from livetchat.server.routes_manifest import router as manifest_router  # /manifest.json
-
-# ------------------------------------------------------------
-# App & CORS
-# ------------------------------------------------------------
-app = FastAPI(title="LiveTchat — HTTP upload + WS notif")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+from livetchat.server.channel_queue import MEDIA, ChannelQueue, MediaItem
+from livetchat.server.routes_manifest import router as manifest_router
+from livetchat.server.security import (
+    LoginGuard, RateLimiter, check_media_signature, check_session_token,
+    clean_text, clean_username, make_session_token, verify_password,
 )
+from livetchat.server.validators import detect
+from livetchat.server.ws_manager import Client, ConnectionManager
+from livetchat.shared.version import VERSION
 
-# Exposer le dossier de téléchargement des mises à jour (pour l'exe)
-try:
-    app.mount("/downloads", StaticFiles(directory=settings.DOWNLOAD_DIR), name="downloads")
-except Exception as e:
-    print("[WARN] downloads mount skipped:", e)
-
-# Route manifest (version, url, sha256)
-app.include_router(manifest_router)
+CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+HELLO_TIMEOUT_S = 10
+COPY_CHUNK = 256 * 1024
 
 # ------------------------------------------------------------
-# Dossiers de stockage médias (tu peux aussi les définir dans settings.py)
-# ------------------------------------------------------------
-IMAGE_DIR = getattr(settings, "IMAGE_DIR", "/home/user/final_livetchat/images")
-VIDEO_DIR = getattr(settings, "VIDEO_DIR", "/home/user/final_livetchat/videos")
-AUDIO_DIR = getattr(settings, "AUDIO_DIR", "/home/user/final_livetchat/audios")
-for d in (IMAGE_DIR, VIDEO_DIR, AUDIO_DIR):
-    os.makedirs(d, exist_ok=True)
-
-# ------------------------------------------------------------
-# WS manager & utilitaires
+# État global (un seul worker uvicorn)
 # ------------------------------------------------------------
 manager = ConnectionManager()
-stored_hashes: set[str] = set()   # dédup simple en mémoire (hash contenu)
+channel_queues: dict[str, ChannelQueue] = {}
+login_guard = LoginGuard(settings.LOGIN_MAX_FAILS, settings.LOGIN_LOCK_S)
+upload_limiter = RateLimiter(settings.UPLOADS_PER_MINUTE, 60)
 
-def md5(data: bytes) -> str:
-    h = hashlib.md5()
-    h.update(data)
-    return h.hexdigest()
 
-def classify(filename: str) -> str:
-    ext = os.path.splitext(filename)[1].lower()
-    if ext in (".jpg", ".jpeg", ".png", ".gif"):
-        return "image"
-    if ext in (".mp4",):
-        return "video"
-    if ext in (".mp3", ".wav", ".ogg", ".m4a"):
-        return "audio"
-    return "unknown"
+async def broadcast_presence():
+    await manager.broadcast_all(presence_snapshot())
 
-def folder_for(kind: str) -> str:
-    return IMAGE_DIR if kind == "image" else VIDEO_DIR if kind == "video" else AUDIO_DIR
+
+def presence_snapshot() -> dict:
+    return {
+        "type": "presence",
+        "channels": [
+            {
+                "id": ch,
+                "members": manager.members(ch),
+                "queue": channel_queues[ch].queue_size(),
+                "playing": channel_queues[ch].current is not None,
+            }
+            for ch in settings.ALLOWED_CHANNELS
+        ],
+    }
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    os.makedirs(settings.MEDIA_DIR, exist_ok=True)
+    # Les fichiers d'une exécution précédente ne sont plus référencés : on vide
+    for fname in os.listdir(settings.MEDIA_DIR):
+        try:
+            os.remove(os.path.join(settings.MEDIA_DIR, fname))
+        except Exception:
+            pass
+    for ch in settings.ALLOWED_CHANNELS:
+        channel_queues[ch] = ChannelQueue(ch, manager, broadcast_presence)
+    if not settings.PASSWORD_HASH:
+        print("[SECURITY] LTCHAT_PASSWORD_HASH absent : personne ne pourra se connecter")
+    print(f"[START] LiveTchat serveur v{VERSION}")
+    yield
+
+
+app = FastAPI(title="LiveTchat", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+app.include_router(manifest_router)
+
+if not settings.USE_X_ACCEL and os.path.isdir(settings.DOWNLOAD_DIR):
+    # En prod c'est nginx qui sert /downloads
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/downloads", StaticFiles(directory=settings.DOWNLOAD_DIR), name="downloads")
+
+
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else "?"
+
+
+def require_auth(request: Request):
+    auth = request.headers.get("authorization", "")
+    token = auth[7:] if auth.lower().startswith("bearer ") else None
+    if not check_session_token(token):
+        raise HTTPException(status_code=401, detail="AUTH_REQUIRED")
+
 
 # ------------------------------------------------------------
-# HTTP: Upload
+# Connexion (mot de passe partagé)
 # ------------------------------------------------------------
-@app.post("/upload/")
+class LoginBody(BaseModel):
+    password: str
+
+
+@app.post("/api/login")
+async def login(body: LoginBody, request: Request):
+    ip = client_ip(request)
+    if login_guard.is_locked(ip):
+        raise HTTPException(status_code=429, detail="TOO_MANY_ATTEMPTS")
+    # scrypt est coûteux : on le sort de la boucle asyncio
+    ok = await asyncio.to_thread(verify_password, body.password)
+    if not ok:
+        login_guard.fail(ip)
+        print(f"[LOGIN] échec depuis {ip}")
+        raise HTTPException(status_code=401, detail="BAD_PASSWORD")
+    login_guard.success(ip)
+    return {"token": make_session_token()}
+
+
+@app.get("/api/channels", dependencies=[Depends(require_auth)])
+def list_channels():
+    return presence_snapshot()["channels"]
+
+
+# ------------------------------------------------------------
+# Upload
+# ------------------------------------------------------------
+@app.post("/api/upload", dependencies=[Depends(require_auth)])
 async def upload_media(
     request: Request,
     file: UploadFile = File(...),
     display_time: float = Form(...),
     display_text: str = Form(""),
     username: str = Form("guest"),
+    channel: str = Form("general"),
+    client_id: str = Form(...),
 ):
-    data = await file.read()
-    size = len(data)
-    ip = request.client.host if request.client else "?"
-    kind = classify(file.filename)
+    ip = client_ip(request)
+    if channel not in settings.ALLOWED_CHANNELS:
+        raise HTTPException(status_code=400, detail="UNKNOWN_CHANNEL")
+    if not CLIENT_ID_RE.match(client_id):
+        raise HTTPException(status_code=400, detail="BAD_CLIENT_ID")
+    if not upload_limiter.allow(ip):
+        raise HTTPException(status_code=429, detail="TOO_MANY_UPLOADS")
+    queue = channel_queues[channel]
+    if queue.is_full():
+        raise HTTPException(status_code=429, detail="QUEUE_FULL")
 
-    if kind == "unknown":
-        print(f"[UPLOAD] REJECT {ip} user='{username}' name='{file.filename}' reason=unsupported")
-        return JSONResponse({"error": "UNSUPPORTED_FORMAT"}, status_code=400)
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    head = await file.read(4096)
+    detected = detect(ext, head)
+    if not detected:
+        print(f"[UPLOAD] REJECT {ip} format='{ext}'")
+        raise HTTPException(status_code=415, detail="UNSUPPORTED_FORMAT")
+    kind, content_type = detected
+    max_bytes = settings.MAX_BYTES[kind]
 
-    # enregistrer (avec déduplication simple par MD5)
-    h = md5(data)
-    folder = folder_for(kind)
-    filename = f"{h}_{file.filename}"
-    path = os.path.join(folder, filename)
-    is_new = False
+    # Nom aléatoire : aucune donnée utilisateur dans le chemin
+    media_id = secrets.token_urlsafe(18)
+    path = os.path.join(settings.MEDIA_DIR, media_id + ext)
+    size = 0
+    try:
+        with open(path, "wb") as out:
+            chunk = head
+            while chunk:
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"TOO_LARGE_MAX_{max_bytes // (1024 * 1024)}MB")
+                out.write(chunk)
+                chunk = await file.read(COPY_CHUNK)
+        os.chmod(path, 0o640)
+    except BaseException:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+    finally:
+        await file.close()
 
-    if h not in stored_hashes or not os.path.exists(path):
-        with open(path, "wb") as f:
-            f.write(data)
-        stored_hashes.add(h)
-        is_new = True
+    if not math.isfinite(display_time):
+        display_time = 5.0
+    display_time = min(max(display_time, settings.MIN_DISPLAY_S), settings.MAX_DISPLAY_S[kind])
+    uname = clean_username(username)
 
-    print(
-        f"[UPLOAD] {ip} user='{username}' kind={kind} name='{file.filename}' "
-        f"saved='{filename}' size={size}B md5={h} new={is_new}"
+    item = MediaItem(
+        media_id=media_id, kind=kind, path=path, content_type=content_type,
+        display_time=display_time, display_text=clean_text(display_text, settings.MAX_TEXT_LEN),
+        username=uname, sender_id=client_id, channel=channel,
     )
+    position = queue.push(item)
+    print(f"[UPLOAD] {ip} '{uname}' #{channel} {kind} {size // 1024}KB {display_time:.0f}s pos={position}")
+    await broadcast_presence()
+    return {"media_id": media_id, "kind": kind, "queue_position": position}
 
-    # notifier tous les clients via WS
-    notice = {
-        "type": "media_notice",
-        "kind": kind,
-        "filename": filename,
-        "display_time": float(display_time),
-        "display_text": display_text or "",
-        "username": username or "guest",
-        "is_new": is_new,
-    }
-    await manager.broadcast_json(notice)
-    print(f"[NOTICE] {kind} '{filename}' -> {manager.receivers_count()} client(s)")
-
-    return {"filename": filename, "kind": kind, "is_new": is_new}
 
 # ------------------------------------------------------------
-# HTTP: Récupération des fichiers (avec logs)
+# Lecture d'un média : lien signé + temporaire, ET session valide
 # ------------------------------------------------------------
-@app.get("/files/images/{filename}")
-def get_image(filename: str, request: Request):
-    path = os.path.join(IMAGE_DIR, filename)
-    ip = request.client.host if request.client else "?"
-    if not os.path.isfile(path):
-        print(f"[GET-404] image {filename} from {ip}")
-        return JSONResponse({"error": "not_found"}, status_code=404)
-    print(f"[GET] image {filename} to {ip}")
-    return FileResponse(path)
+@app.get("/media/{media_id}/{exp}/{sig}", dependencies=[Depends(require_auth)])
+def get_media(media_id: str, exp: int, sig: str):
+    item = MEDIA.get(media_id)
+    if not item or not check_media_signature(media_id, exp, sig) or not os.path.isfile(item.path):
+        raise HTTPException(status_code=404, detail="EXPIRED")
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    if settings.USE_X_ACCEL:
+        # nginx envoie le fichier lui-même (sendfile + Range), Python ne touche pas aux octets
+        headers["X-Accel-Redirect"] = settings.X_ACCEL_PREFIX + os.path.basename(item.path)
+        return Response(status_code=200, media_type=item.content_type, headers=headers)
+    return FileResponse(item.path, media_type=item.content_type, headers=headers)
 
-@app.get("/files/videos/{filename}")
-def get_video(filename: str, request: Request):
-    path = os.path.join(VIDEO_DIR, filename)
-    ip = request.client.host if request.client else "?"
-    if not os.path.isfile(path):
-        print(f"[GET-404] video {filename} from {ip}")
-        return JSONResponse({"error": "not_found"}, status_code=404)
-    print(f"[GET] video {filename} to {ip}")
-    return StreamingResponse(open(path, "rb"), media_type="video/mp4")
-
-@app.get("/files/audios/{filename}")
-def get_audio(filename: str, request: Request):
-    path = os.path.join(AUDIO_DIR, filename)
-    ip = request.client.host if request.client else "?"
-    if not os.path.isfile(path):
-        print(f"[GET-404] audio {filename} from {ip}")
-        return JSONResponse({"error": "not_found"}, status_code=404)
-    print(f"[GET] audio {filename} to {ip}")
-    return StreamingResponse(open(path, "rb"), media_type="application/octet-stream")
-
-# (Optionnel) petites listes pour debug
-@app.get("/files/images/")
-def list_images(): return os.listdir(IMAGE_DIR)
-@app.get("/files/videos/")
-def list_videos(): return os.listdir(VIDEO_DIR)
-@app.get("/files/audios/")
-def list_audios(): return os.listdir(AUDIO_DIR)
 
 # ------------------------------------------------------------
-# WebSocket: /ws (keep-open; notifications envoyées depuis /upload/)
+# WebSocket : présence + diffusion
 # ------------------------------------------------------------
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    await manager.connect(ws)
+    await ws.accept()
+    if len(manager.clients) >= settings.MAX_WS_CLIENTS:
+        await ws.close(code=1013)
+        return
+
+    # 1er message obligatoire : hello (avec le jeton), sinon on coupe
     try:
-        # on ne s'échange pas de messages applicatifs ; on bloque sur lecture
-        while True:
-            # ping/pong bas niveau garde la connexion; ici on attend juste un texte
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        await manager.disconnect(ws)
+        hello = json.loads(await asyncio.wait_for(ws.receive_text(), HELLO_TIMEOUT_S))
+        assert isinstance(hello, dict) and hello.get("type") == "hello"
     except Exception:
-        await manager.disconnect(ws)
+        await ws.close(code=4000)
+        return
+    if not check_session_token(hello.get("token")):
+        try:
+            await ws.send_text(json.dumps({"type": "auth_error"}))
+        finally:
+            await ws.close(code=4001)
+        return
+    client_id = str(hello.get("client_id", ""))
+    if not CLIENT_ID_RE.match(client_id):
+        await ws.close(code=4002)
+        return
+    channel = hello.get("channel")
+    if channel not in settings.ALLOWED_CHANNELS:
+        channel = settings.ALLOWED_CHANNELS[0]
+
+    client = Client(ws=ws, client_id=client_id, username=clean_username(hello.get("username")), channel=channel)
+    manager.add(client)
+    await manager.send(client, {"type": "welcome", "version": VERSION, "channel": channel})
+    await broadcast_presence()
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            if not client.limiter.allow("msg"):
+                continue
+            try:
+                msg = json.loads(raw)
+                mtype = msg.get("type")
+            except Exception:
+                continue
+
+            if mtype == "join" and msg.get("channel") in settings.ALLOWED_CHANNELS:
+                client.channel = msg["channel"]
+                await manager.send(client, {"type": "joined", "channel": client.channel})
+                await broadcast_presence()
+            elif mtype == "rename":
+                client.username = clean_username(msg.get("username"))
+                await broadcast_presence()
+            elif mtype == "skip":
+                queue = channel_queues[client.channel]
+                if queue.skip(str(msg.get("media_id", "")), client.client_id):
+                    print(f"[SKIP] '{client.username}' #{client.channel}")
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[WS] erreur '{client.username}': {e}")
+    finally:
+        manager.remove(client)
+        await broadcast_presence()
+
 
 # ------------------------------------------------------------
 # Entrée
@@ -184,9 +285,13 @@ def main():
         "livetchat.server.main:app",
         host=settings.HOST,
         port=settings.PORT,
-        reload=False,
+        workers=1,
         access_log=False,
+        proxy_headers=True,
+        forwarded_allow_ips="127.0.0.1",
+        ws_max_size=64 * 1024,
     )
+
 
 if __name__ == "__main__":
     main()

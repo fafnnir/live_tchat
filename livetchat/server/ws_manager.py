@@ -1,51 +1,64 @@
-import asyncio, json
+# livetchat/server/ws_manager.py
+# Connexions WebSocket authentifiées : qui est connecté, dans quel salon, avec quel pseudo.
+import asyncio
+import json
+from dataclasses import dataclass, field
+
 from fastapi import WebSocket
+
+from livetchat.server.security import RateLimiter
+
+SEND_TIMEOUT_S = 5
+
+
+@dataclass(eq=False)
+class Client:
+    ws: WebSocket
+    client_id: str
+    username: str
+    channel: str
+    limiter: RateLimiter = field(default_factory=lambda: RateLimiter(20, 10))
+
 
 class ConnectionManager:
 
     def __init__(self):
-        self.active = set()
-        self._lock = asyncio.Lock()
+        self.clients: set[Client] = set()
 
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
-        async with self._lock:
-            self.active.add(ws)
-        peer = f"{getattr(ws.client, 'host', '?')}:{getattr(ws.client, 'port', '?')}"
-        print(f"[WS] connect {peer} — now {len(self.active)} client(s)")
+    def add(self, client: Client):
+        self.clients.add(client)
+        print(f"[WS] +1 '{client.username}' #{client.channel} — {len(self.clients)} connecté(s)")
 
-    async def disconnect(self, ws: WebSocket):
-        async with self._lock:
-            if ws in self.active:
-                self.active.remove(ws)
-        peer = f"{getattr(ws.client, 'host', '?')}:{getattr(ws.client, 'port', '?')}"
-        print(f"[WS] disconnect {peer} — now {len(self.active)} client(s)")
+    def remove(self, client: Client):
+        if client in self.clients:
+            self.clients.discard(client)
+            print(f"[WS] -1 '{client.username}' #{client.channel} — {len(self.clients)} connecté(s)")
 
-    async def broadcast_json(self, message, exclude=None):
-        import asyncio
+    def members(self, channel: str) -> list[str]:
+        return sorted((c.username for c in self.clients if c.channel == channel), key=str.lower)
+
+    async def _send_many(self, targets: list[Client], message: dict):
+        if not targets:
+            return
         payload = json.dumps(message)
-        conns = list(self.active)
-        tasks = []
-        for w in conns:
-            if exclude and w in exclude: continue
-            tasks.append((w, asyncio.create_task(w.send_text(payload))))
-        results = await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
-        for (w,_), res in zip(tasks, results):
-            if isinstance(res, Exception):
-                print("[WS] send_text failed -> disconnecting:", res)
-                await self.disconnect(w)
+        results = await asyncio.gather(
+            *(asyncio.wait_for(c.ws.send_text(payload), SEND_TIMEOUT_S) for c in targets),
+            return_exceptions=True,
+        )
+        for client, err in zip(targets, results):
+            if isinstance(err, Exception):
+                print(f"[WS] envoi échoué vers '{client.username}' → déconnexion")
+                self.remove(client)
+                try:
+                    await client.ws.close()
+                except Exception:
+                    pass
 
-    async def broadcast_bytes(self, data, exclude=None):
-        import asyncio
-        conns = list(self.active); tasks = []
-        for w in conns:
-            if exclude and w in exclude: continue
-            tasks.append((w, asyncio.create_task(w.send_bytes(data))))
-        results = await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
-        for (w,_), res in zip(tasks, results):
-            if isinstance(res, Exception):
-                await self.disconnect(w)
-                
-    def receivers_count(self, exclude=None):
-        if exclude: return max(0, len(self.active)-len(exclude))
-        return len(self.active)
+    async def send(self, client: Client, message: dict):
+        await self._send_many([client], message)
+
+    async def broadcast_to_channel(self, channel: str, message: dict):
+        await self._send_many([c for c in self.clients if c.channel == channel], message)
+
+    async def broadcast_all(self, message: dict):
+        await self._send_many(list(self.clients), message)

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Build PyInstaller
+build/
+dist/
+dist_new/
+
+# Propre à chaque installation (adresse du serveur, certificat, secrets)
+.env
+livetchat/client/server.json
+livetchat/client/server_cert.pem
+*.pem
+*.key
+
+# Local
+tmp/
+.tchat_config.json

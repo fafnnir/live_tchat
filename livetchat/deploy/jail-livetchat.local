@@ -1,0 +1,9 @@
+# /etc/fail2ban/jail.d/livetchat.local  (remplace l'ancien jail [livetchat] basé sur server.log)
+[livetchat]
+enabled  = true
+port     = 8000
+filter   = livetchat-nginx
+logpath  = /var/log/nginx/access.log
+maxretry = 10
+findtime = 120
+bantime  = 86400

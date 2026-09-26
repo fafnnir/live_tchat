@@ -1,6 +1,12 @@
+# Serveur (Ubuntu, venv)
 fastapi
 uvicorn[standard]
-pillow
-websocket-client
-python-vlc
+python-multipart
+
+# Client (Windows, build de l'exe)
+PyQt6>=6.5          # lecteur multimédia intégré (FFmpeg), plus besoin de VLC
 requests
+websocket-client
+Pillow>=11.2        # AVIF
+pillow-heif         # photos iPhone (HEIC)
+pyinstaller

@@ -1,0 +1,40 @@
+# /etc/systemd/system/livetchat.service
+[Unit]
+Description=LiveTchat serveur
+After=network.target
+
+[Service]
+User=ubuntu
+# Groupe www-data : nginx peut lire les médias (fichiers en 0640)
+Group=www-data
+WorkingDirectory=/home/ubuntu/livetchat
+EnvironmentFile=/home/ubuntu/livetchat/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/livetchat/venv/bin/uvicorn livetchat.server.main:app \
+    --host 127.0.0.1 --port 8001 --workers 1 --no-access-log \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 \
+    --ws-max-size 65536 --limit-concurrency 200 --timeout-keep-alive 5
+Restart=always
+RestartSec=3
+
+# Ressources : la VM n'a que 1 Go de RAM
+MemoryMax=300M
+CPUQuota=150%
+
+# Durcissement
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/livetchat
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
