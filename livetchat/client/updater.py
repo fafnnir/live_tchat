@@ -95,11 +95,16 @@ def _perform_update(url: str, sha256_hex: str, parent=None):
         'del /f /q %TARGET% >nul 2>&1\nmove /y %NEW% %TARGET%\n'
         'start "" %TARGET%\ndel "%~f0"\n'
     )
+    # Le nouvel exe ne doit pas hériter des variables internes de PyInstaller de celui-ci :
+    # sinon il cherche python3xx.dll dans notre dossier _MEI temporaire, effacé à la fermeture
+    # ("Failed to load Python DLL").
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("_MEI", "_PYI"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     try:
         with open(bat_path, "w", encoding="utf-8") as f:
             f.write(batch)
         subprocess.Popen(["cmd", "/c", bat_path, sys.executable, new_path], close_fds=True,
-                         creationflags=subprocess.CREATE_NO_WINDOW)
+                         env=env, creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception as e:
         _msg(parent, "MAJ", f"Lancement de la mise à jour impossible : {e}", QMessageBox.Icon.Critical)
         return
