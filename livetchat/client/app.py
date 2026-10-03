@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 
 from livetchat.client import api
 from livetchat.client.config import load_config, save_config
+from livetchat.client.hotkeys import AVAILABLE as HOTKEYS_AVAILABLE, GlobalHotkeys, HotkeyButton, bind_label
 from livetchat.client.media_overlay import MediaWindow, find_screen, identify_screens, screen_label
 from livetchat.client.media_prep import FILE_FILTER, PrepError, kind_of, prepare, probe_duration
 from livetchat.client.updater import check_update
@@ -58,6 +59,13 @@ QPushButton#btn_danger {
     padding: 8px 14px; font-size: 13px; font-weight: bold;
 }
 QPushButton#btn_danger:hover { background-color: #a12828; }
+QPushButton#btn_hotkey {
+    background-color: #1e1f22; color: #dbdee1; border: 1px solid #1e1f22; border-radius: 6px;
+    padding: 7px 12px; font-size: 13px; text-align: left;
+}
+QPushButton#btn_hotkey:hover { border: 1px solid #4e5058; }
+QPushButton#btn_hotkey:focus { border: 1px solid #5865f2; }
+QPushButton#btn_hotkey[error="true"] { border: 1px solid #f23f43; color: #f23f43; }
 QFrame#card { background-color: #2b2d31; border-radius: 10px; }
 QFrame#sidebar { background-color: #2b2d31; }
 QTreeWidget {
@@ -174,10 +182,11 @@ class MainWindow(QMainWindow):
         self._login_open = False
 
         self.setWindowTitle(f"LiveTchat {VERSION}")
-        self.resize(760, 560)
-        self.setMinimumSize(660, 500)
+        self.resize(760, 730)
+        self.setMinimumSize(660, 700)
         self.setStyleSheet(STYLE)
         self._build_ui(cfg)
+        self._start_hotkeys()
         self._start_ws(cfg)
         QTimer.singleShot(1500, self._auto_check_update)
 
@@ -293,6 +302,31 @@ class MainWindow(QMainWindow):
         row.addWidget(self._btn_skip)
         lay.addLayout(row)
         right.addWidget(now_card)
+
+        # Raccourcis globaux (marchent même quand LiveTchat n'a pas le focus)
+        self._hotkey_btns: dict[str, HotkeyButton] = {}
+        if HOTKEYS_AVAILABLE:
+            keys_card = self._make_card()
+            lay = keys_card.layout()
+            lay.addWidget(self._section_label("Raccourcis (marchent aussi en jeu)"))
+            for action, label in (("stop", "Stop (chez moi) :"), ("skip", "Passer pour tous :")):
+                row = QHBoxLayout()
+                lbl = QLabel(label)
+                lbl.setFixedWidth(130)
+                row.addWidget(lbl)
+                btn = HotkeyButton(cfg[f"hotkey_{action}"])
+                btn.capture_started.connect(lambda: self._hotkeys.release())
+                btn.capture_finished.connect(lambda bind, a=action: self._on_hotkey_captured(a, bind))
+                row.addWidget(btn, 1)
+                btn_clear = QPushButton("✕")
+                btn_clear.setObjectName("btn_secondary")
+                btn_clear.setFixedWidth(36)
+                btn_clear.setToolTip("Retirer le raccourci")
+                btn_clear.clicked.connect(lambda _c, a=action: self._on_hotkey_captured(a, ""))
+                row.addWidget(btn_clear)
+                lay.addLayout(row)
+                self._hotkey_btns[action] = btn
+            right.addWidget(keys_card)
 
         right.addStretch()
 
@@ -600,6 +634,44 @@ class MainWindow(QMainWindow):
         if self._current and self._current.get("mine"):
             self._ws.skip(self._current["media_id"])
 
+    # ── Raccourcis globaux ─────────────────────────────────────
+    def _start_hotkeys(self):
+        self._hotkeys = GlobalHotkeys(["stop", "skip"])
+        self._hotkeys.triggered.connect(self._on_hotkey)
+        self._apply_hotkeys()
+
+    def _apply_hotkeys(self):
+        ok = self._hotkeys.apply({a: btn.bind() for a, btn in self._hotkey_btns.items()})
+        refused = []
+        for action, btn in self._hotkey_btns.items():
+            btn.set_error(not ok.get(action, True))
+            btn.setToolTip("" if ok.get(action, True) else "Déjà utilisé par une autre appli (ou par Windows)")
+            if not ok.get(action, True):
+                refused.append(bind_label(btn.bind()))
+        if refused:
+            self._status.showMessage(f"⚠️  Raccourci déjà pris par une autre appli : {', '.join(refused)}")
+
+    def _on_hotkey_captured(self, action: str, bind):
+        btn = self._hotkey_btns[action]
+        if bind is not None:
+            other = next((a for a, b in self._hotkey_btns.items() if a != action and b.bind() == bind), None)
+            if bind and other:
+                self._status.showMessage(f"⚠️  {bind_label(bind)} est déjà utilisé pour l'autre action.")
+                btn.set_bind(load_config()[f"hotkey_{action}"])
+            else:
+                btn.set_bind(bind)
+                save_config(**{f"hotkey_{action}": bind})
+                self._status.showMessage(f"✅  Raccourci enregistré : {bind_label(bind)}" if bind
+                                         else "Raccourci retiré.")
+        self._apply_hotkeys()
+
+    def _on_hotkey(self, action: str):
+        # Rien en cours, ou "Passer pour tous" sur le média d'un autre : la touche ne fait rien
+        if action == "stop":
+            self._stop_local()
+        elif action == "skip":
+            self._skip_all()
+
     def _refresh_now_playing(self):
         cur = self._current
         if not cur:
@@ -620,6 +692,8 @@ class MainWindow(QMainWindow):
         self._run(api.fetch_manifest, on_done=lambda m: check_update(VERSION, self, manifest=m, silent=True))
 
     def closeEvent(self, event):
+        self._hotkeys.release()
+        self._hotkeys.close()
         self._close_media()
         self._ws.stop()
         self._ws_thread.quit()

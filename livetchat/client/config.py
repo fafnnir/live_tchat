@@ -32,7 +32,8 @@ CLIENT_ID = secrets.token_urlsafe(16)
 
 CONFIG_PATH = Path.home() / ".tchat_config.json"
 _DEFAULTS = {"username": "guest", "token": "", "on_top": True, "channel": "general",
-             "screen": ""}   # screen : nom de l'écran d'affichage, "" = principal
+             "screen": "",   # screen : nom de l'écran d'affichage, "" = principal
+             "hotkey_stop": "", "hotkey_skip": ""}   # raccourcis globaux "mods:vk", "" = aucun
 
 
 def load_config() -> dict:
