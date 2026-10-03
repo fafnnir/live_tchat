@@ -7,7 +7,7 @@ from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, QTimer, p
 from PyQt6.QtGui import QBrush, QColor, QFont, QGuiApplication, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QStatusBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMainWindow, QPushButton, QStackedWidget, QStatusBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from livetchat.client import api
@@ -65,6 +65,12 @@ QPushButton#btn_hotkey {
 }
 QPushButton#btn_hotkey:hover { border: 1px solid #4e5058; }
 QPushButton#btn_hotkey:focus { border: 1px solid #5865f2; }
+QPushButton#btn_nav {
+    background-color: transparent; color: #949ba4; border: none; border-radius: 4px;
+    padding: 8px 8px; font-size: 14px; text-align: left;
+}
+QPushButton#btn_nav:hover { background-color: #35373c; color: #dbdee1; }
+QPushButton#btn_nav:checked { background-color: #404249; color: white; font-weight: bold; }
 QPushButton#btn_hotkey[error="true"] { border: 1px solid #f23f43; color: #f23f43; }
 QFrame#card { background-color: #2b2d31; border-radius: 10px; }
 QFrame#sidebar { background-color: #2b2d31; }
@@ -182,8 +188,8 @@ class MainWindow(QMainWindow):
         self._login_open = False
 
         self.setWindowTitle(f"LiveTchat {VERSION}")
-        self.resize(760, 730)
-        self.setMinimumSize(660, 700)
+        self.resize(760, 560)
+        self.setMinimumSize(660, 500)
         self.setStyleSheet(STYLE)
         self._build_ui(cfg)
         self._start_hotkeys()
@@ -217,10 +223,21 @@ class MainWindow(QMainWindow):
         self._channel_items: dict[str, QTreeWidgetItem] = {}
         self._channel_item(self._channel)
         side.addWidget(self._tree)
+        # En bas de la barre : pages de réglages (comme les paramètres de Discord)
+        self._btn_keys_page = QPushButton("⌨   Raccourcis")
+        self._btn_keys_page.setObjectName("btn_nav")
+        self._btn_keys_page.setCheckable(True)
+        self._btn_keys_page.clicked.connect(self._show_keys_page)
+        self._btn_keys_page.setVisible(HOTKEYS_AVAILABLE)
+        side.addWidget(self._btn_keys_page)
         root.addWidget(sidebar)
 
-        # Partie droite
-        right = QVBoxLayout()
+        # Partie droite : page du salon, ou page des raccourcis
+        self._pages = QStackedWidget()
+        root.addWidget(self._pages, 1)
+        main_page = QWidget()
+        self._pages.addWidget(main_page)
+        right = QVBoxLayout(main_page)
         right.setContentsMargins(16, 14, 16, 12)
         right.setSpacing(12)
 
@@ -303,31 +320,6 @@ class MainWindow(QMainWindow):
         lay.addLayout(row)
         right.addWidget(now_card)
 
-        # Raccourcis globaux (marchent même quand LiveTchat n'a pas le focus)
-        self._hotkey_btns: dict[str, HotkeyButton] = {}
-        if HOTKEYS_AVAILABLE:
-            keys_card = self._make_card()
-            lay = keys_card.layout()
-            lay.addWidget(self._section_label("Raccourcis (marchent aussi en jeu)"))
-            for action, label in (("stop", "Stop (chez moi) :"), ("skip", "Passer pour tous :")):
-                row = QHBoxLayout()
-                lbl = QLabel(label)
-                lbl.setFixedWidth(130)
-                row.addWidget(lbl)
-                btn = HotkeyButton(cfg[f"hotkey_{action}"])
-                btn.capture_started.connect(lambda: self._hotkeys.release())
-                btn.capture_finished.connect(lambda bind, a=action: self._on_hotkey_captured(a, bind))
-                row.addWidget(btn, 1)
-                btn_clear = QPushButton("✕")
-                btn_clear.setObjectName("btn_secondary")
-                btn_clear.setFixedWidth(36)
-                btn_clear.setToolTip("Retirer le raccourci")
-                btn_clear.clicked.connect(lambda _c, a=action: self._on_hotkey_captured(a, ""))
-                row.addWidget(btn_clear)
-                lay.addLayout(row)
-                self._hotkey_btns[action] = btn
-            right.addWidget(keys_card)
-
         right.addStretch()
 
         # Bas : écran d'affichage, case "par-dessus tout", mise à jour
@@ -361,13 +353,68 @@ class MainWindow(QMainWindow):
         row.addWidget(btn_update)
         right.addLayout(row)
 
-        root.addLayout(right, 1)
+        self._build_keys_page(cfg)
 
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("Connexion…")
         self._refresh_channel_ui()
         self._refresh_now_playing()
+
+    def _build_keys_page(self, cfg: dict):
+        """Page des raccourcis globaux (marchent même quand LiveTchat n'a pas le focus)."""
+        self._hotkey_btns: dict[str, HotkeyButton] = {}
+        if not HOTKEYS_AVAILABLE:
+            return
+        page = QWidget()
+        self._pages.addWidget(page)
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(12)
+        title = QLabel("⌨  Raccourcis")
+        title.setStyleSheet("color: white; font-size: 20px; font-weight: bold;")
+        lay.addWidget(title)
+
+        card = self._make_card()
+        card_lay = card.layout()
+        card_lay.addWidget(self._section_label("Média en cours"))
+        for action, label in (("stop", "Stop (chez moi) :"), ("skip", "Passer pour tous :")):
+            row = QHBoxLayout()
+            lbl = QLabel(label)
+            lbl.setFixedWidth(130)
+            row.addWidget(lbl)
+            btn = HotkeyButton(cfg[f"hotkey_{action}"])
+            btn.capture_started.connect(lambda: self._hotkeys.release())
+            btn.capture_finished.connect(lambda bind, a=action: self._on_hotkey_captured(a, bind))
+            row.addWidget(btn, 1)
+            btn_clear = QPushButton("✕")
+            btn_clear.setObjectName("btn_secondary")
+            btn_clear.setFixedWidth(36)
+            btn_clear.setToolTip("Retirer le raccourci")
+            btn_clear.clicked.connect(lambda _c, a=action: self._on_hotkey_captured(a, ""))
+            row.addWidget(btn_clear)
+            card_lay.addLayout(row)
+            self._hotkey_btns[action] = btn
+        hint = QLabel("Les raccourcis marchent partout, même en jeu ou quand LiveTchat est réduit.\n"
+                      "Clique sur un champ puis appuie sur ta combinaison (Échap = annuler).\n"
+                      "La combinaison est réservée à LiveTchat : les autres applis ne la reçoivent plus, "
+                      "préfère une combinaison avec Ctrl ou Alt.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        card_lay.addWidget(hint)
+        lay.addWidget(card)
+        lay.addStretch()
+
+    def _show_keys_page(self):
+        self._btn_keys_page.setChecked(True)
+        self._pages.setCurrentIndex(1)
+        self._tree.clearSelection()
+        self._tree.setCurrentItem(None)
+
+    def _show_main_page(self):
+        self._btn_keys_page.setChecked(False)
+        self._pages.setCurrentIndex(0)
+        self._refresh_channel_ui()
 
     def _make_card(self) -> QFrame:
         card = QFrame()
@@ -456,6 +503,8 @@ class MainWindow(QMainWindow):
 
     def _on_tree_click(self, item: QTreeWidgetItem, _col: int):
         ch = item.data(0, Qt.ItemDataRole.UserRole)
+        if self._pages.currentIndex() != 0:
+            self._show_main_page()
         if ch and ch != self._channel:
             self._channel = ch
             save_config(channel=ch)
@@ -481,7 +530,8 @@ class MainWindow(QMainWindow):
             f.setBold(ch == self._channel)
             item.setFont(0, f)
             item.setForeground(0, QBrush(QColor("white" if ch == self._channel else "#949ba4")))
-        self._tree.setCurrentItem(self._channel_items[self._channel])
+        if self._pages.currentIndex() == 0:   # sur la page Raccourcis, aucun salon n'est sélectionné
+            self._tree.setCurrentItem(self._channel_items[self._channel])
         self._title.setText(f"#  {self._channel}")
         self._btn_send.setText(f"  Envoyer dans #{self._channel}")
 
